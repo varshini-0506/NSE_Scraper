@@ -1,6 +1,7 @@
 import os
 import shutil
 import time
+import threading
 from typing import List, Dict
 
 import requests
@@ -11,6 +12,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 
@@ -78,6 +80,54 @@ def _build_driver(headless: bool = True) -> webdriver.Chrome:
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(30)
     return driver
+
+
+# Global driver management for resource-constrained environments
+_driver_lock = threading.Lock()
+_driver = None
+
+
+def _create_driver():
+    """Create a new driver instance (wrapper for _build_driver)."""
+    return _build_driver(headless=True)
+
+
+def get_shared_driver():
+    """
+    Return a shared Selenium driver protected by a lock.
+    Use with `with` statement to ensure exclusive access.
+    
+    Example:
+        with get_shared_driver() as driver:
+            driver.get(url)
+            html = driver.page_source
+    """
+    class DriverContext:
+        def __enter__(self_inner):
+            global _driver
+            _driver_lock.acquire()
+            if _driver is None:
+                _driver = _create_driver()
+            self_inner.driver = _driver
+            return self_inner.driver
+
+        def __exit__(self_inner, exc_type, exc, tb):
+            _driver_lock.release()
+    return DriverContext()
+
+
+def reset_driver():
+    """
+    Kill and recreate the shared driver (used after crashes).
+    """
+    global _driver
+    with _driver_lock:
+        if _driver is not None:
+            try:
+                _driver.quit()
+            except Exception:
+                pass
+            _driver = None
 
 
 def _init_nse_session() -> requests.Session:
@@ -461,19 +511,21 @@ def get_event_calendar_for_symbol(symbol: str, headless: bool = True) -> List[Di
     if not USE_SELENIUM_FALLBACK:
         raise RuntimeError("API fetch failed and Selenium fallback disabled")
 
-    driver = _build_driver(headless=headless)
     try:
-        driver.get(NSE_BASE_URL)
-        url = f"{EVENT_CAL_URL}?symbol={symbol}"
-        driver.get(url)
+        with get_shared_driver() as driver:
+            driver.get(NSE_BASE_URL)
+            url = f"{EVENT_CAL_URL}?symbol={symbol}"
+            driver.get(url)
 
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.ID, "CFeventCalendarTable")))
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.ID, "CFeventCalendarTable")))
 
-        html = driver.page_source
-        return _parse_event_calendar_table(html)
-    finally:
-        driver.quit()
+            html = driver.page_source
+            return _parse_event_calendar_table(html)
+    except WebDriverException as e:
+        # If Chrome crashed, reset the shared driver so next request gets a fresh one
+        reset_driver()
+        raise RuntimeError(f"Chrome driver error: {str(e)}")
 
 
 def get_board_meetings_for_symbol(symbol: str, headless: bool = True) -> List[Dict]:
@@ -492,20 +544,22 @@ def get_board_meetings_for_symbol(symbol: str, headless: bool = True) -> List[Di
     if not USE_SELENIUM_FALLBACK:
         raise RuntimeError("API fetch failed and Selenium fallback disabled")
 
-    driver = _build_driver(headless=headless)
     try:
-        driver.get(NSE_BASE_URL)
+        with get_shared_driver() as driver:
+            driver.get(NSE_BASE_URL)
 
-        url = f"{BOARD_MEETINGS_URL}?symbol={symbol}"
-        driver.get(url)
+            url = f"{BOARD_MEETINGS_URL}?symbol={symbol}"
+            driver.get(url)
 
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.ID, "CFboardmeetingEquityTable")))
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.ID, "CFboardmeetingEquityTable")))
 
-        html = driver.page_source
-        return _parse_board_meetings_table(html)
-    finally:
-        driver.quit()
+            html = driver.page_source
+            return _parse_board_meetings_table(html)
+    except WebDriverException as e:
+        # If Chrome crashed, reset the shared driver so next request gets a fresh one
+        reset_driver()
+        raise RuntimeError(f"Chrome driver error: {str(e)}")
 
 
 def get_corporate_actions_for_symbol(symbol: str, headless: bool = True) -> List[Dict]:
@@ -524,20 +578,22 @@ def get_corporate_actions_for_symbol(symbol: str, headless: bool = True) -> List
     if not USE_SELENIUM_FALLBACK:
         raise RuntimeError("API fetch failed and Selenium fallback disabled")
 
-    driver = _build_driver(headless=headless)
     try:
-        driver.get(NSE_BASE_URL)
+        with get_shared_driver() as driver:
+            driver.get(NSE_BASE_URL)
 
-        url = f"{CORP_ACTIONS_URL}?symbol={symbol}"
-        driver.get(url)
+            url = f"{CORP_ACTIONS_URL}?symbol={symbol}"
+            driver.get(url)
 
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.ID, "CFcorpactionsEquityTable")))
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.ID, "CFcorpactionsEquityTable")))
 
-        html = driver.page_source
-        return _parse_corporate_actions_table(html)
-    finally:
-        driver.quit()
+            html = driver.page_source
+            return _parse_corporate_actions_table(html)
+    except WebDriverException as e:
+        # If Chrome crashed, reset the shared driver so next request gets a fresh one
+        reset_driver()
+        raise RuntimeError(f"Chrome driver error: {str(e)}")
 
 
 def _fetch_announcements_api(symbol: str) -> List[Dict]:
@@ -592,60 +648,62 @@ def get_announcements_for_symbol(symbol: str, headless: bool = True) -> List[Dic
     if not USE_SELENIUM_FALLBACK:
         raise RuntimeError("API fetch failed and Selenium fallback disabled")
 
-    driver = _build_driver(headless=headless)
     try:
-        print(f"[DEBUG] Loading NSE base URL...")
-        driver.get(NSE_BASE_URL)
-        time.sleep(2)  # Wait for cookies/session
+        with get_shared_driver() as driver:
+            print(f"[DEBUG] Loading NSE base URL...")
+            driver.get(NSE_BASE_URL)
+            time.sleep(2)  # Wait for cookies/session
 
-        url = f"{ANNOUNCEMENTS_URL}?symbol={symbol}"
-        print(f"[DEBUG] Loading announcements URL: {url}")
-        driver.get(url)
-        
-        # Wait longer for table to load - try multiple strategies
-        wait = WebDriverWait(driver, 25)
-        table_found = False
-        
-        # Strategy 1: Wait for table by ID
-        try:
-            wait.until(EC.presence_of_element_located((By.ID, "CFanncEquityTable")))
-            # Also wait for it to be visible and have rows
-            wait.until(EC.visibility_of_element_located((By.ID, "CFanncEquityTable")))
-            time.sleep(2)  # Additional wait for dynamic content
-            table_found = True
-            print(f"[DEBUG] Table CFanncEquityTable found and visible")
-        except Exception as e:
-            print(f"[DEBUG] Table not found with ID CFanncEquityTable: {str(e)}")
-        
-        # Strategy 2: Try alternative selectors
-        if not table_found:
+            url = f"{ANNOUNCEMENTS_URL}?symbol={symbol}"
+            print(f"[DEBUG] Loading announcements URL: {url}")
+            driver.get(url)
+            
+            # Wait longer for table to load - try multiple strategies
+            wait = WebDriverWait(driver, 25)
+            table_found = False
+            
+            # Strategy 1: Wait for table by ID
             try:
-                # Wait for any table with 'annc' in ID
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table[id*='annc']")))
-                time.sleep(2)
+                wait.until(EC.presence_of_element_located((By.ID, "CFanncEquityTable")))
+                # Also wait for it to be visible and have rows
+                wait.until(EC.visibility_of_element_located((By.ID, "CFanncEquityTable")))
+                time.sleep(2)  # Additional wait for dynamic content
                 table_found = True
-                print(f"[DEBUG] Found table with alternative selector")
-            except:
-                pass
-        
-        # Strategy 3: Wait for tbody with rows
-        if not table_found:
-            try:
-                wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table#CFanncEquityTable tbody tr")) > 0)
-                time.sleep(2)
-                table_found = True
-                print(f"[DEBUG] Found table rows")
-            except:
-                pass
-        
-        # Final wait for any dynamic loading
-        if table_found:
-            time.sleep(3)
-        else:
-            time.sleep(5)
+                print(f"[DEBUG] Table CFanncEquityTable found and visible")
+            except Exception as e:
+                print(f"[DEBUG] Table not found with ID CFanncEquityTable: {str(e)}")
+            
+            # Strategy 2: Try alternative selectors
+            if not table_found:
+                try:
+                    # Wait for any table with 'annc' in ID
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "table[id*='annc']")))
+                    time.sleep(2)
+                    table_found = True
+                    print(f"[DEBUG] Found table with alternative selector")
+                except:
+                    pass
+            
+            # Strategy 3: Wait for tbody with rows
+            if not table_found:
+                try:
+                    wait.until(lambda d: len(d.find_elements(By.CSS_SELECTOR, "table#CFanncEquityTable tbody tr")) > 0)
+                    time.sleep(2)
+                    table_found = True
+                    print(f"[DEBUG] Found table rows")
+                except:
+                    pass
+            
+            # Final wait for any dynamic loading
+            if table_found:
+                time.sleep(3)
+            else:
+                time.sleep(5)
 
-        html = driver.page_source
-        rows = _parse_announcements_table(html)
-        return rows
-    finally:
-        driver.quit()
+            html = driver.page_source
+            rows = _parse_announcements_table(html)
+            return rows
+    except WebDriverException as e:
+        # If Chrome crashed, reset the shared driver so next request gets a fresh one
+        reset_driver()
+        raise RuntimeError(f"Chrome driver error: {str(e)}")
