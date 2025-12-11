@@ -4,15 +4,17 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     CHROME_BIN=/usr/bin/chromium \
     CHROMEDRIVER_PATH=/usr/bin/chromedriver \
-    PORT=8000
+    PORT=8000 \
+    DEBIAN_FRONTEND=noninteractive
 
-# Install chromium and chromedriver
+# Install Chromium + Chromedriver + basic fonts
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-      chromium \
-      chromium-driver \
-      ca-certificates \
-      curl && \
+        chromium \
+        chromium-driver \
+        fonts-dejavu \
+        ca-certificates \
+        curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
