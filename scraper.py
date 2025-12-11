@@ -40,21 +40,12 @@ def _build_driver(headless: bool = True) -> webdriver.Chrome:
     chrome_options = Options()
     if headless:
         chrome_options.add_argument("--headless=new")
-    
-    # Essential arguments for Docker/containerized environments
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-setuid-sandbox")
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-software-rasterizer")
-    chrome_options.add_argument("--disable-background-timer-throttling")
-    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_options.add_argument("--disable-renderer-backgrounding")
-    chrome_options.add_argument("--disable-features=TranslateUI")
-    chrome_options.add_argument("--disable-ipc-flooding-protection")
     chrome_options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -79,27 +70,14 @@ def _build_driver(headless: bool = True) -> webdriver.Chrome:
 
     # Prefer preinstalled chromedriver if available
     chromedriver_path = os.environ.get("CHROMEDRIVER_PATH") or shutil.which("chromedriver")
-    if chromedriver_path and os.path.exists(chromedriver_path):
+    if chromedriver_path:
         service = Service(chromedriver_path)
     else:
-        # Use ChromeDriverManager as fallback
-        try:
-            service = Service(ChromeDriverManager().install())
-        except Exception as e:
-            # If ChromeDriverManager fails, try to use system chromedriver
-            system_chromedriver = shutil.which("chromedriver")
-            if system_chromedriver:
-                service = Service(system_chromedriver)
-            else:
-                raise RuntimeError(f"Could not find chromedriver: {e}")
+        service = Service(ChromeDriverManager().install())
 
-    try:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(10)
-        return driver
-    except Exception as e:
-        raise RuntimeError(f"Failed to start Chrome driver: {e}. Chrome binary: {chrome_bin}, ChromeDriver: {chromedriver_path or 'ChromeDriverManager'}")
+    driver = webdriver.Chrome(service=service, options=chrome_options)
+    driver.set_page_load_timeout(30)
+    return driver
 
 
 def _init_nse_session() -> requests.Session:
