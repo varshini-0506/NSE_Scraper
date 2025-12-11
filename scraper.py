@@ -21,6 +21,14 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
+# Enable nested event loops for Flask/Gunicorn compatibility
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+    NEST_ASYNCIO_AVAILABLE = True
+except ImportError:
+    NEST_ASYNCIO_AVAILABLE = False
+
 
 NSE_BASE_URL = "https://www.nseindia.com"
 EVENT_CAL_URL = NSE_BASE_URL + "/companies-listing/corporate-filings-event-calendar"
@@ -930,29 +938,42 @@ def get_equity_quote_for_symbol(symbol: str, headless: bool = True) -> dict:
     """
     Fetch equity quote data for the given symbol.
     Synchronous wrapper around async Playwright scraper.
+    Runs in a separate thread to avoid Flask/Gunicorn event loop conflicts.
     """
     if not PLAYWRIGHT_AVAILABLE:
         return {"error": "Playwright is not installed. Install it with: pip install playwright && playwright install"}
     
-    try:
-        # Try asyncio.run() first (works in standalone scripts)
-        # If that fails (event loop already running), use get_event_loop()
+    import threading
+    import queue
+    
+    # Run in a separate thread to completely isolate from Flask's event loop
+    # This creates a fresh event loop just like standalone scripts do
+    result_queue = queue.Queue()
+    
+    def run_in_thread():
         try:
-            result = asyncio.run(_scrape_equity_quote_async(symbol, headless))
-            return result
-        except RuntimeError:
-            # Event loop already running (Flask/Gunicorn case)
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Need to run in executor or use nest_asyncio
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, _scrape_equity_quote_async(symbol, headless))
-                    result = future.result()
-                    return result
-            else:
-                result = loop.run_until_complete(_scrape_equity_quote_async(symbol, headless))
-                return result
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(_scrape_equity_quote_async(symbol, headless))
+            result_queue.put(result)
+        except Exception as e:
+            result_queue.put({"error": str(e)})
+        finally:
+            if 'loop' in locals():
+                loop.close()
+    
+    try:
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+        thread.join(timeout=120)  # 2 minute timeout
+        
+        if thread.is_alive():
+            return {"error": "Request timeout - scraping took too long"}
+        
+        if result_queue.empty():
+            return {"error": "No result returned"}
+        
+        return result_queue.get()
     except Exception as e:
         return {"error": str(e)}
 
@@ -1304,28 +1325,39 @@ def get_financial_results_for_symbol(symbol: str, headless: bool = True) -> dict
     """
     Fetch financial results comparison data for the given symbol.
     Synchronous wrapper around async Playwright scraper.
+    Runs in a separate thread to avoid Flask/Gunicorn event loop conflicts.
     """
     if not PLAYWRIGHT_AVAILABLE:
         return {"status": "error", "message": "Playwright is not installed. Install it with: pip install playwright && playwright install"}
     
+    import threading
+    import queue
+    
     try:
-        # Try asyncio.run() first (works in standalone scripts)
-        # If that fails (event loop already running), use get_event_loop()
-        try:
-            result = asyncio.run(_scrape_financial_results_async(symbol, headless))
-            return result
-        except RuntimeError:
-            # Event loop already running (Flask/Gunicorn case)
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # Need to run in executor or use nest_asyncio
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, _scrape_financial_results_async(symbol, headless))
-                    result = future.result()
-                    return result
-            else:
+        # Run in a separate thread to completely isolate from Flask's event loop
+        result_queue = queue.Queue()
+        
+        def run_in_thread():
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
                 result = loop.run_until_complete(_scrape_financial_results_async(symbol, headless))
-                return result
+                result_queue.put(result)
+            except Exception as e:
+                result_queue.put({"status": "error", "message": str(e)})
+            finally:
+                loop.close()
+        
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+        thread.join(timeout=180)  # 3 minute timeout for financial results
+        
+        if thread.is_alive():
+            return {"status": "error", "message": "Request timeout - scraping took too long"}
+        
+        if result_queue.empty():
+            return {"status": "error", "message": "Request timeout"}
+        
+        return result_queue.get()
     except Exception as e:
         return {"status": "error", "message": str(e)}

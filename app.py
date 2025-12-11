@@ -1,6 +1,13 @@
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import BadRequest
 
+# Enable nest_asyncio at the very top to allow nested event loops in Flask/Gunicorn
+try:
+    import nest_asyncio
+    nest_asyncio.apply()
+except ImportError:
+    pass
+
 from scraper import (
     get_event_calendar_for_symbol,
     get_board_meetings_for_symbol,
