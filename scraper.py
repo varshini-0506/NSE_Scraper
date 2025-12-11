@@ -20,6 +20,7 @@ BOARD_MEETINGS_URL = NSE_BASE_URL + "/companies-listing/corporate-filings-board-
 CORP_ACTIONS_URL = NSE_BASE_URL + "/companies-listing/corporate-filings-actions"
 CORP_FILING_API = NSE_BASE_URL + "/api/corporate-filing"
 CORP_ACTIONS_API = NSE_BASE_URL + "/api/corporate-actions"
+USE_SELENIUM_FALLBACK = os.environ.get("USE_SELENIUM_FALLBACK", "true").lower() == "true"
 
 DEFAULT_HEADERS = {
     "user-agent": (
@@ -53,18 +54,26 @@ def _build_driver(headless: bool = True) -> webdriver.Chrome:
     # Explicitly set Chromium binary if provided (Render needs this)
     chrome_bin = os.environ.get("CHROME_BIN")
     if not chrome_bin:
-        # fallbacks common across distros
-        for candidate in ("/usr/bin/chromium", "/usr/bin/chromium-browser", "/usr/bin/google-chrome"):
+        for candidate in (
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/usr/bin/google-chrome",
+        ):
             if os.path.exists(candidate):
                 chrome_bin = candidate
                 break
         if not chrome_bin:
-            # last resort: search PATH
             chrome_bin = shutil.which("chromium") or shutil.which("chromium-browser") or shutil.which("google-chrome")
     if chrome_bin:
         chrome_options.binary_location = chrome_bin
 
-    service = Service(ChromeDriverManager().install())
+    # Prefer preinstalled chromedriver if available
+    chromedriver_path = os.environ.get("CHROMEDRIVER_PATH") or shutil.which("chromedriver")
+    if chromedriver_path:
+        service = Service(chromedriver_path)
+    else:
+        service = Service(ChromeDriverManager().install())
+
     driver = webdriver.Chrome(service=service, options=chrome_options)
     driver.set_page_load_timeout(30)
     return driver
@@ -76,8 +85,15 @@ def _init_nse_session() -> requests.Session:
     """
     session = requests.Session()
     session.headers.update(DEFAULT_HEADERS)
+    session.headers.update(
+        {
+            "referer": NSE_BASE_URL,
+            "accept": "application/json,text/html;q=0.9",
+            "accept-encoding": "gzip, deflate, br",
+        }
+    )
     # Prime cookies
-    resp = session.get(NSE_BASE_URL, timeout=8)
+    resp = session.get(NSE_BASE_URL, timeout=5)
     resp.raise_for_status()
     return session
 
@@ -95,7 +111,7 @@ def _fetch_corporate_actions_api(symbol: str) -> List[Dict]:
     resp = session.get(
         CORP_ACTIONS_API,
         params={"index": "equities", "symbol": symbol},
-        timeout=12,
+        timeout=10,
     )
     resp.raise_for_status()
     payload = resp.json()
@@ -123,7 +139,7 @@ def _fetch_board_meetings_api(symbol: str) -> List[Dict]:
     resp = session.get(
         CORP_FILING_API,
         params={"index": "equities", "symbol": symbol, "type": "Board Meeting"},
-        timeout=12,
+        timeout=10,
     )
     resp.raise_for_status()
     payload = resp.json()
@@ -153,7 +169,7 @@ def _fetch_event_calendar_api(symbol: str) -> List[Dict]:
     resp = session.get(
         CORP_FILING_API,
         params={"index": "equities", "symbol": symbol, "type": "Event Calendar"},
-        timeout=12,
+        timeout=10,
     )
     resp.raise_for_status()
     payload = resp.json()
@@ -360,17 +376,17 @@ def get_event_calendar_for_symbol(symbol: str, headless: bool = True) -> List[Di
     except Exception:
         pass
 
-    # Fallback: Selenium (slower)
+    if not USE_SELENIUM_FALLBACK:
+        raise RuntimeError("API fetch failed and Selenium fallback disabled")
+
     driver = _build_driver(headless=headless)
     try:
         driver.get(NSE_BASE_URL)
-        time.sleep(2)
         url = f"{EVENT_CAL_URL}?symbol={symbol}"
         driver.get(url)
 
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 15)
         wait.until(EC.presence_of_element_located((By.ID, "CFeventCalendarTable")))
-        time.sleep(1.5)
 
         html = driver.page_source
         return _parse_event_calendar_table(html)
@@ -391,17 +407,18 @@ def get_board_meetings_for_symbol(symbol: str, headless: bool = True) -> List[Di
     except Exception:
         pass
 
+    if not USE_SELENIUM_FALLBACK:
+        raise RuntimeError("API fetch failed and Selenium fallback disabled")
+
     driver = _build_driver(headless=headless)
     try:
         driver.get(NSE_BASE_URL)
-        time.sleep(2)
 
         url = f"{BOARD_MEETINGS_URL}?symbol={symbol}"
         driver.get(url)
 
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 15)
         wait.until(EC.presence_of_element_located((By.ID, "CFboardmeetingEquityTable")))
-        time.sleep(1.5)
 
         html = driver.page_source
         return _parse_board_meetings_table(html)
@@ -422,17 +439,18 @@ def get_corporate_actions_for_symbol(symbol: str, headless: bool = True) -> List
     except Exception:
         pass
 
+    if not USE_SELENIUM_FALLBACK:
+        raise RuntimeError("API fetch failed and Selenium fallback disabled")
+
     driver = _build_driver(headless=headless)
     try:
         driver.get(NSE_BASE_URL)
-        time.sleep(2)
 
         url = f"{CORP_ACTIONS_URL}?symbol={symbol}"
         driver.get(url)
 
-        wait = WebDriverWait(driver, 25)
+        wait = WebDriverWait(driver, 15)
         wait.until(EC.presence_of_element_located((By.ID, "CFcorpactionsEquityTable")))
-        time.sleep(1.5)
 
         html = driver.page_source
         return _parse_corporate_actions_table(html)
