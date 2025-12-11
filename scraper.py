@@ -244,30 +244,46 @@ def _fetch_event_calendar_api(symbol: str) -> List[Dict]:
 
 
 def _fetch_announcements_api(symbol: str) -> List[Dict]:
+    """
+    Try to fetch announcements via API. 
+    Note: The NSE API may not support announcements, so this often returns empty.
+    """
     session = _init_nse_session()
-    resp = session.get(
-        CORP_FILING_API,
-        params={"index": "equities", "symbol": symbol, "type": "Announcement"},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    items = payload.get("data") or payload.get("rows") or payload or []
-    rows: List[Dict] = []
-    for item in items:
-        rows.append(
-            {
-                "symbol": _pick(item, ["symbol", "SYMBOL"], symbol),
-                "company": _pick(item, ["sm_name", "company", "companyName"], ""),
-                "subject": _pick(item, ["desc", "subject", "purpose"], ""),
-                "details": _pick(item, ["attchmntText", "details", "description"], ""),
-                "attachment_link": _pick(item, ["attachment", "attachmentUrl", "pdfUrl"], ""),
-                "attachment_size": _pick(item, ["attachmentSize", "size"], ""),
-                "xbrl_link": _pick(item, ["xbrlUrl", "xbrl_link", "xmlUrl"], ""),
-                "broadcast_datetime": _pick(item, ["an_dt", "broadcastDateTime", "broadcast_time"], ""),
-            }
-        )
-    return rows
+    # Try different possible type values
+    for api_type in ["Announcement", "Corporate Announcement", "Announcements"]:
+        try:
+            resp = session.get(
+                CORP_FILING_API,
+                params={"index": "equities", "symbol": symbol, "type": api_type},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            items = payload.get("data") or payload.get("rows") or payload or []
+            
+            # If we got items, process them
+            if items and len(items) > 0:
+                rows: List[Dict] = []
+                for item in items:
+                    rows.append(
+                        {
+                            "symbol": _pick(item, ["symbol", "SYMBOL"], symbol),
+                            "company": _pick(item, ["sm_name", "company", "companyName"], ""),
+                            "subject": _pick(item, ["desc", "subject", "purpose"], ""),
+                            "details": _pick(item, ["attchmntText", "details", "description"], ""),
+                            "attachment_link": _pick(item, ["attachment", "attachmentUrl", "pdfUrl"], ""),
+                            "attachment_size": _pick(item, ["attachmentSize", "size"], ""),
+                            "xbrl_link": _pick(item, ["xbrlUrl", "xbrl_link", "xmlUrl"], ""),
+                            "broadcast_datetime": _pick(item, ["an_dt", "broadcastDateTime", "broadcast_time"], ""),
+                        }
+                    )
+                if rows:
+                    return rows
+        except Exception:
+            continue
+    
+    # No API type worked, return empty
+    return []
 
 
 def _parse_event_calendar_table(html: str) -> List[Dict]:
@@ -545,7 +561,10 @@ def _parse_announcements_table(html: str) -> List[Dict]:
     soup = BeautifulSoup(html, "lxml")
     table = soup.find("table", id="CFanncEquityTable")
     if not table:
-        return []
+        # Try alternative table IDs or class names
+        table = soup.find("table", class_=lambda x: x and "CFannc" in str(x))
+        if not table:
+            return []
 
     rows: List[Dict] = []
     tbody = table.find("tbody")
@@ -557,100 +576,151 @@ def _parse_announcements_table(html: str) -> List[Dict]:
         if len(tds) < 7:
             continue
 
-        # 0: symbol
-        symbol_cell = tds[0]
-        symbol_link = symbol_cell.find("a")
-        symbol = (symbol_link.get_text(strip=True) if symbol_link else symbol_cell.get_text(strip=True))
+        try:
+            # 0: symbol
+            symbol_cell = tds[0]
+            symbol_link = symbol_cell.find("a")
+            symbol = (symbol_link.get_text(strip=True) if symbol_link else symbol_cell.get_text(strip=True))
 
-        # 1: company name
-        company = tds[1].get_text(strip=True)
+            # 1: company name
+            company = tds[1].get_text(strip=True)
 
-        # 2: subject
-        subject = tds[2].get_text(strip=True)
+            # 2: subject
+            subject = tds[2].get_text(strip=True)
 
-        # 3: details
-        details_cell = tds[3]
-        # Try to get full text from data attribute first
-        full_desc_attr = details_cell.get("data-ws-symbol-col-prev") or details_cell.get("data-ws-symbol-col")
-        if full_desc_attr:
-            details = full_desc_attr.strip()
-        else:
-            # Try content span (truncated text)
-            content_span = details_cell.find("span", class_="content")
-            if content_span:
-                details = content_span.get_text(strip=True)
+            # 3: details
+            details_cell = tds[3]
+            # Try to get full text from data attribute first (data-ws-symbol-col-prev has full text)
+            # Check if the td element has the attribute
+            full_desc_attr = details_cell.attrs.get("data-ws-symbol-col-prev") or details_cell.get("data-ws-symbol-col-prev")
+            if full_desc_attr:
+                details = str(full_desc_attr).strip()
             else:
-                details = details_cell.get_text(strip=True)
+                # Try data-ws-symbol-col attribute
+                desc_attr = details_cell.attrs.get("data-ws-symbol-col") or details_cell.get("data-ws-symbol-col")
+                if desc_attr:
+                    details = str(desc_attr).strip()
+                else:
+                    # Try content span (truncated text)
+                    content_span = details_cell.find("span", class_="content")
+                    if content_span:
+                        details = content_span.get_text(strip=True)
+                    else:
+                        # Fallback to all text in the cell
+                        details = details_cell.get_text(strip=True, separator=" ")
 
-        # 4: attachment (PDF link and size)
-        attachment_cell = tds[4]
-        attachment_anchor = attachment_cell.find("a")
-        attachment_link = ""
-        attachment_size = ""
-        if attachment_anchor and attachment_anchor.has_attr("href"):
-            attachment_link = attachment_anchor["href"]
-            # Get size from the <p> tag that follows
-            size_p = attachment_cell.find("p", class_="mt-1")
-            if size_p:
-                attachment_size = size_p.get_text(strip=True)
+            # 4: attachment (PDF link and size)
+            attachment_cell = tds[4]
+            attachment_anchor = attachment_cell.find("a")
+            attachment_link = ""
+            attachment_size = ""
+            if attachment_anchor and attachment_anchor.has_attr("href"):
+                attachment_link = attachment_anchor["href"]
+                # Get size from the <p> tag that follows
+                size_p = attachment_cell.find("p", class_="mt-1")
+                if size_p:
+                    attachment_size = size_p.get_text(strip=True)
 
-        # 5: XBRL link
-        xbrl_cell = tds[5]
-        xbrl_anchor = xbrl_cell.find("a")
-        xbrl_link = ""
-        if xbrl_anchor and xbrl_anchor.has_attr("href"):
-            xbrl_link = xbrl_anchor["href"]
-            # Make it absolute if relative
-            if xbrl_link.startswith("/"):
-                xbrl_link = NSE_BASE_URL + xbrl_link
+            # 5: XBRL link
+            xbrl_cell = tds[5]
+            xbrl_anchor = xbrl_cell.find("a")
+            xbrl_link = ""
+            if xbrl_anchor and xbrl_anchor.has_attr("href"):
+                xbrl_link = xbrl_anchor["href"]
+                # Make it absolute if relative
+                if xbrl_link.startswith("/"):
+                    xbrl_link = NSE_BASE_URL + xbrl_link
 
-        # 6: broadcast date/time
-        broadcast_datetime = tds[6].get_text(strip=True)
+            # 6: broadcast date/time
+            broadcast_datetime_cell = tds[6]
+            # The date might be in an <a> tag or directly in the cell
+            date_link = broadcast_datetime_cell.find("a")
+            if date_link:
+                # Get text from the link, but remove the hover table HTML
+                broadcast_datetime = date_link.get_text(strip=True)
+                # Clean up - remove any extra whitespace/newlines
+                broadcast_datetime = " ".join(broadcast_datetime.split())
+            else:
+                broadcast_datetime = broadcast_datetime_cell.get_text(strip=True)
 
-        rows.append(
-            {
-                "symbol": symbol,
-                "company": company,
-                "subject": subject,
-                "details": details,
-                "attachment_link": attachment_link,
-                "attachment_size": attachment_size,
-                "xbrl_link": xbrl_link,
-                "broadcast_datetime": broadcast_datetime,
-            }
-        )
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "company": company,
+                    "subject": subject,
+                    "details": details,
+                    "attachment_link": attachment_link,
+                    "attachment_size": attachment_size,
+                    "xbrl_link": xbrl_link,
+                    "broadcast_datetime": broadcast_datetime,
+                }
+            )
+        except Exception as e:
+            # Skip rows that fail to parse
+            continue
+
     return rows
 
 
 def get_announcements_for_symbol(symbol: str, headless: bool = True) -> List[Dict]:
     """
-    Fetch announcements for the given symbol via API, fallback to Selenium.
+    Fetch announcements for the given symbol. Uses Selenium since API may not be available.
     """
     symbol = symbol.upper().strip()
 
-    # Fast path: API
+    # Try API first (may not work for announcements - API might not support this type)
+    # But if it returns empty, we still want to try Selenium
+    api_rows = []
     try:
-        rows = _fetch_announcements_api(symbol)
-        if rows:
-            return rows
+        api_rows = _fetch_announcements_api(symbol)
+        # Only return API results if we actually got data
+        if api_rows and len(api_rows) > 0:
+            return api_rows
     except Exception:
+        # API failed, continue to Selenium
         pass
 
+    # API returned empty or failed, use Selenium
     if not USE_SELENIUM_FALLBACK:
         raise RuntimeError("API fetch failed and Selenium fallback disabled")
 
     driver = _build_driver(headless=headless)
     try:
+        # First visit base URL to set cookies
         driver.get(NSE_BASE_URL)
+        time.sleep(2)  # Give time for cookies to be set
 
+        # Navigate to announcements page
         url = f"{ANNOUNCEMENTS_URL}?symbol={symbol}"
         driver.get(url)
-
-        wait = WebDriverWait(driver, 15)
+        
+        # Wait for table to load
+        wait = WebDriverWait(driver, 20)
         wait.until(EC.presence_of_element_located((By.ID, "CFanncEquityTable")))
+        
+        # Wait for table body to have at least one row
+        try:
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "#CFanncEquityTable tbody tr")))
+        except Exception:
+            # If no rows found, wait a bit more
+            time.sleep(5)
+        
+        # Additional wait for table content to render (table might be there but empty initially)
+        time.sleep(3)
 
         html = driver.page_source
-        return _parse_announcements_table(html)
+        rows = _parse_announcements_table(html)
+        
+        # If still empty, try waiting a bit more and check again
+        # Sometimes the table loads but rows populate via JavaScript
+        if not rows:
+            time.sleep(3)
+            # Try scrolling to trigger lazy loading if any
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(2)
+            html = driver.page_source
+            rows = _parse_announcements_table(html)
+        
+        return rows
     finally:
-        driver.quit()
         driver.quit()
