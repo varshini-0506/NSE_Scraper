@@ -1,0 +1,21 @@
+services:
+- type: web
+  name: nse-scraping
+  env: python
+  plan: free
+  branch: main
+  buildCommand: |
+    pip install --upgrade pip
+    pip install -r requirements.txt
+    # Install Chromium for Selenium; Render base image is Debian/Ubuntu
+    apt-get update
+    apt-get install -y chromium
+  startCommand: |
+    PORT=${PORT:-8000}
+    python app.py
+  envVars:
+    - key: PYTHON_VERSION
+      value: 3.11
+    # Optional: tweak Selenium to point to chromium path if needed
+    - key: CHROME_BIN
+      value: /usr/bin/chromium
