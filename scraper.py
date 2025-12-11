@@ -18,30 +18,54 @@ DEFAULT_HEADERS = {
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/129.0.0.0 Safari/537.36"
     ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.5",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
 }
 
 
 def _init_nse_session() -> requests.Session:
     """
     Prepare a requests session with headers and cookies primed by hitting the base URL.
+    NSE requires proper session cookies and headers to avoid 403 errors.
     """
+    import time
+    
     session = requests.Session()
+    
+    # Set comprehensive headers to mimic a real browser
     session.headers.update(DEFAULT_HEADERS)
-    session.headers.update(
-        {
-            "referer": NSE_BASE_URL,
-            "accept": "application/json,text/html;q=0.9",
-            "accept-encoding": "gzip, deflate, br",
-        }
-    )
-    # Prime cookies
-    resp = session.get(NSE_BASE_URL, timeout=5)
-    resp.raise_for_status()
+    
+    # First, visit the base URL to establish session and get cookies
+    # This is critical - NSE sets session cookies on the first visit
+    try:
+        # Initial visit with minimal headers
+        resp = session.get(NSE_BASE_URL, timeout=15, allow_redirects=True)
+        resp.raise_for_status()
+        
+        # Wait a bit to simulate human behavior and let cookies settle
+        time.sleep(1.5)
+        
+        # Optionally visit a common page to further establish session
+        # This helps with some NSE endpoints that check navigation history
+        try:
+            session.get(f"{NSE_BASE_URL}/market-data", timeout=10, allow_redirects=True)
+            time.sleep(0.5)
+        except:
+            pass
+            
+    except requests.RequestException as e:
+        # If base URL fails, still return session (some endpoints might work)
+        # But log that session initialization had issues
+        pass
+    
     return session
 
 
@@ -391,13 +415,63 @@ def _parse_announcements_table(html: str) -> List[Dict]:
 
 
 def _fetch_html(session: requests.Session, url: str, params: dict = None) -> str:
-    """Fetch HTML content from NSE URL with proper session handling."""
-    try:
-        resp = session.get(url, params=params, timeout=20)
-        resp.raise_for_status()
-        return resp.text
-    except requests.RequestException as e:
-        raise RuntimeError(f"Failed to fetch {url}: {e}")
+    """
+    Fetch HTML content from NSE URL with proper session handling.
+    Updates headers for the specific request to avoid 403 errors.
+    """
+    import time
+    
+    # Update headers for this specific request (mimic browser navigation)
+    session.headers.update({
+        "Referer": NSE_BASE_URL,
+        "Sec-Fetch-Dest": "document",
+        "Sec-Fetch-Mode": "navigate",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-User": "?1",
+    })
+    
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            # Add small delay to avoid rate limiting
+            if attempt > 0:
+                time.sleep(2)  # Longer delay on retry
+            
+            resp = session.get(url, params=params, timeout=20, allow_redirects=True)
+            
+            # Check for 403 or other errors
+            if resp.status_code == 403:
+                if attempt < max_retries - 1:
+                    # Refresh session by visiting base URL again
+                    try:
+                        session.get(NSE_BASE_URL, timeout=10, allow_redirects=True)
+                        time.sleep(1)
+                    except:
+                        pass
+                    continue
+                else:
+                    raise RuntimeError(f"403 Forbidden: NSE is blocking requests. This may require browser automation.")
+            
+            resp.raise_for_status()
+            return resp.text
+            
+        except requests.HTTPError as e:
+            if hasattr(e, 'response') and e.response.status_code == 403 and attempt < max_retries - 1:
+                # Try refreshing session
+                try:
+                    session.get(NSE_BASE_URL, timeout=10, allow_redirects=True)
+                    time.sleep(1)
+                except:
+                    pass
+                continue
+            status_code = getattr(e.response, 'status_code', 'N/A') if hasattr(e, 'response') else 'N/A'
+            raise RuntimeError(f"HTTP {status_code} error fetching {url}: {e}")
+        except requests.RequestException as e:
+            if attempt < max_retries - 1:
+                continue
+            raise RuntimeError(f"Failed to fetch {url}: {e}")
+    
+    raise RuntimeError(f"Failed to fetch {url} after {max_retries} attempts")
 
 
 def get_event_calendar_for_symbol(symbol: str, headless: bool = True) -> List[Dict]:
