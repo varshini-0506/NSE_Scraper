@@ -1,6 +1,5 @@
 from flask import Flask, request, jsonify
 from werkzeug.exceptions import BadRequest
-from selenium.common.exceptions import TimeoutException, WebDriverException
 
 from scraper import (
     get_event_calendar_for_symbol,
