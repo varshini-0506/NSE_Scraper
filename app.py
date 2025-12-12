@@ -6,7 +6,6 @@ from scraper import (
     get_event_calendar_for_symbol,
     get_board_meetings_for_symbol,
     get_corporate_actions_for_symbol,
-    get_announcements_for_symbol,
 )
 
 
@@ -153,103 +152,6 @@ def create_app():
                 ),
                 500,
             )
-
-        return jsonify(
-            {
-                "symbol": symbol.upper(),
-                "count": len(rows),
-                "rows": rows,
-            }
-        )
-
-    @app.route("/announcements", methods=["GET"])
-    def announcements():
-        """
-        GET /announcements?symbol=RELIANCE
-
-        Response:
-        {
-          "symbol": "RELIANCE",
-          "count": 30,
-          "rows": [
-            {
-              "symbol": "RELIANCE",
-              "company": "Reliance Industries Limited",
-              "subject": "Copy of Newspaper Publication",
-              "details": "Newspaper clippings...",
-              "attachment_link": "https://nsearchives.nseindia.com/corporate/...",
-              "attachment_size": "(9.78 MB)",
-              "xbrl_link": "https://www.nseindia.com/api/xbrl/106465293",
-              "broadcast_datetime": "10-Dec-2025 18:22:17",
-            },
-            ...
-          ]
-        }
-        """
-        symbol = request.args.get("symbol", "").strip()
-        if not symbol:
-            raise BadRequest("Query parameter 'symbol' is required")
-
-        # Try API fetch separately to differentiate errors
-        api_error = None
-        selenium_error = None
-        
-        try:
-            rows = get_announcements_for_symbol(symbol, headless=True)
-        except TimeoutException as e:
-            # Selenium timeout
-            selenium_error = str(e)
-            return (
-                jsonify(
-                    {
-                        "symbol": symbol.upper(),
-                        "error": "selenium_timeout",
-                        "message": f"Selenium timeout: {selenium_error}",
-                    }
-                ),
-                500,
-            )
-        except WebDriverException as e:
-            # Selenium driver error
-            selenium_error = str(e)
-            return (
-                jsonify(
-                    {
-                        "symbol": symbol.upper(),
-                        "error": "selenium_driver_error",
-                        "message": f"Selenium driver error: {selenium_error}",
-                    }
-                ),
-                500,
-            )
-        except Exception as e:
-            # Check if it's an API error or Selenium error based on message
-            error_msg = str(e)
-            if "API" in error_msg or "fetch" in error_msg.lower():
-                api_error = error_msg
-                return (
-                    jsonify(
-                        {
-                            "symbol": symbol.upper(),
-                            "error": "api_fetch_failed",
-                            "message": f"API fetch failed: {api_error}",
-                        }
-                    ),
-                    500,
-                )
-            else:
-                # Assume Selenium error
-                selenium_error = error_msg
-                return (
-                    jsonify(
-                        {
-                            "symbol": symbol.upper(),
-                            "error": "selenium_error",
-                            "message": f"Selenium error: {selenium_error}",
-                        }
-                    ),
-                    500,
-                )
 
         return jsonify(
             {
